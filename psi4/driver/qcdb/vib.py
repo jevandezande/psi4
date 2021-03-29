@@ -53,6 +53,12 @@ def compare_vibinfos(expected, computed, tol, label, verbose=1, forgive=None, re
     """
     np.set_printoptions(formatter={'float': '{: 0.4f}'.format})
 
+    defaults = {
+        "svd": "1.e-6",
+    }
+    defaults.update(**toldict)
+    toldict = defaults
+
     def _success(label):
         """Function to print a '*label*...PASSED' line to screen.
         Used by :py:func:`util.compare_values` family when functions pass.
@@ -74,25 +80,17 @@ def compare_vibinfos(expected, computed, tol, label, verbose=1, forgive=None, re
                 except TypeError:
                     print('\tdif: Different, inspect arrays')
 
-    if forgive is None:
-        forgive = []
+    forgive = [] if forgive is None
 
     summsame = []
-    if required is None:
-        checkkeys = []
-    else:
-        checkkeys = required
+    checkkeys = [] if required is None else required
     checkkeys.extend(expected.keys())
 
-    svdtol = 1.e-6 if toldict is None else toldict.get("svd", 1.e-6)
     for asp in checkkeys:
         if asp not in computed and asp in forgive:
             continue
 
-        if toldict is not None and asp in toldict:
-            ktol = toldict[asp]
-        else:
-            ktol = tol
+        ktol = toldict.get(asp, tol)
 
         if asp in 'qwx':
             ccnc = _phase_cols_to_max_element(computed[asp].data)
@@ -118,10 +116,10 @@ def compare_vibinfos(expected, computed, tol, label, verbose=1, forgive=None, re
         if asp not in forgive:
             summsame.append(same)
 
-    passed = all(summsame)
-    if passed:
+    if all(summsame):
         _success(label)
-    return passed
+        return True
+    return False
 
 
 def hessian_symmetrize(hess, mol):
@@ -145,11 +143,8 @@ def hessian_symmetrize(hess, mol):
     # Obtain atom mapping of atom * symm op to atom
     atom_map = compute_atom_map(mol)
 
-    syms = []
-    smap = []
-    for g in range(ct.order()):
-        syms.append(np.asarray(ct.symm_operation(g).d))
-        smap.append([atom_map[at][g] for at in range(mol.natom())])
+    syms = [np.asarray(ct.symm_operation(g).d) for g in range(ct.order())]
+    smap = [atom_map[at][g] for g in range(ct.order()) for at in range(mol.natom())]
 
     np.set_printoptions(formatter={'float': '{: 16.12f}'.format})
     b_hess = blockwise_expand(hess, (3, 3), False)
@@ -166,12 +161,11 @@ def hessian_symmetrize(hess, mol):
     for sym in range(len(syms)):
         bDG[sym] = bDG[sym][:, smap[sym]]
         bDG[sym] = bDG[sym][smap[sym], :]
-    tot = np.sum(bDG, axis=0)
-    tot = np.divide(tot, len(syms))
 
-    print('symmetrization diff:', np.linalg.norm(tot - b_hess))
-    m_tot = blockwise_contract(tot)
-    return m_tot
+    tot = np.sum(bDG, axis=0) / len(syms)
+
+    print(f"symmetrization diff: {np.linalg.norm(tot - b_hess)")
+    return blockwise_contract(tot)
 
 
 def print_molden_vibs(vibinfo, atom_symbol, geom, standalone=True):
@@ -204,32 +198,26 @@ def print_molden_vibs(vibinfo, atom_symbol, geom, standalone=True):
     nat = int(len(vibinfo['q'].data[:, 0]) / 3)
     active = [idx for idx, trv in enumerate(vibinfo['TRV'].data) if trv == 'V']
 
-    text = ''
-    if standalone:
-        text += """[Molden Format]\n"""
+    text = '' if not standalone else "[Molden Format]\n"
 
-    text += """\n[FREQ]\n"""
+    text += "\n[FREQ]\n"
     for vib in active:
-        if vibinfo['omega'].data[vib].imag > vibinfo['omega'].data[vib].real:
-            freq = -1.0 * vibinfo['omega'].data[vib].imag
-        else:
-            freq = vibinfo['omega'].data[vib].real
-        text += """   {:20.10f}\n""".format(freq)
+        energy = vibinfo['omega'].data[vib]
+        freq = -1.0 * energy.imag if energy.imag > energy.real else energy.real
+        text += f"   {freq:20.10f}\n"
 
-    text += """\n[FR-COORD]\n"""
-    for at in range(nat):
-        text += ("""{:3}""" + """{:20.10f}""" * 3 + '\n').format(atom_symbol[at], *geom[at])
+    geom_form = "{:3}" + "{:20.10f}" * 3 + "\n"
+    text += "\n[FR-COORD]\n"
+    text += "".join(geom_form.format(atom_symbol[at], *xyz) for at, xyz in enumerate(geom)) + "\n"
 
-    text += """\n[FR-NORM-COORD]\n"""
+    norm_coord_form = "   " + "{:20.10f}" * 3 + '\n'
+    text += "\n[FR-NORM-COORD]\n"
     for idx, vib in enumerate(active):
-        text += """vibration {}\n""".format(idx + 1)
-        for at in range(nat):
-            text += ('   ' + """{:20.10f}""" * 3 + '\n').format(*(vibinfo['x'].data[:, vib].reshape(nat, 3)[at].real))
+        text += f"vibration {idx + 1}\n"
+        data = vibinfo['x'].data[:, vib].reshape(nat, 3)
+        text += ''.join(norm_coord_form.format(*xyz.real) for xyz in data)
 
-
-#     text += """\n[INT]\n"""
-#     for vib in active:
-#         text += """1.0\n"""
+#     text += "\n[INT]\n" + "1.0\n"*len(active)
 
     return text
 
@@ -252,10 +240,8 @@ def _check_rank_degen_modes(arr, freq, ref, difftol, svdtol, verbose=1):
         # expected normal coordinates and computed normal coordinates span the same space
         ranks_ok = rank_cvecs == rank_evecs == rank_cevecs
 
-        if degree == 1:
-            normco_ok = normco_ok and diff_ok
-        else:
-            normco_ok = normco_ok and ranks_ok
+        normco_ok &= diff_ok if degree == 1 else ranks_ok
+
         if verbose >= 2 or not normco_ok:
             with np.printoptions(precision=4):
                 print(f"degree={degree} difftol={difftol} {diff_ok} svdtol={svdtol} {rank_cvecs} == {rank_evecs} == {rank_cevecs} {rank_cvecs == rank_evecs == rank_cevecs} svd={CE}")
@@ -289,9 +275,9 @@ def _check_degen_modes(arr, freq, verbose=1):
 
     arr2 = arr[:, idx_vib_reordering]
 
-    reorderings = ['{}-->{}'.format(i, v) for i, v in enumerate(idx_vib_reordering) if (i != v)]
+    reorderings = [f"{i}-->{v}" for i, v in enumerate(idx_vib_reordering) if (i != v)]
     if reorderings and verbose >= 2:
-        print('Degenerate modes reordered:', ', '.join(reorderings))
+        print("Degenerate modes reordered:", ", ".join(reorderings))
 
     return arr2
 
@@ -306,12 +292,10 @@ def _phase_cols_to_max_element(arr, tol=1.e-2, verbose=1):
 
     rephasing = []
     for v in range(arr.shape[1]):
-        vextreme = 0.0
         iextreme = None
 
         # find most extreme value
-        for varr in arr[:, v]:
-            vextreme = max(np.absolute(varr), vextreme)
+        vextreme = max(max(np.absolute(arr[:, v])), 0)
 
         # find the first index whose fabs equals that value, w/i tolerance
         for iarr, varr in enumerate(arr[:, v]):
@@ -320,7 +304,7 @@ def _phase_cols_to_max_element(arr, tol=1.e-2, verbose=1):
                 break
 
         sign = np.sign(arr[iextreme, v])
-        if sign == -1.:
+        if sign == -1:
             rephasing.append(str(v))
         arr2[:, v] *= sign
 
@@ -407,7 +391,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
         pass
     else:
         raise ValidationError(
-            f"""Dimension mismatch among mass ({mass.shape}), geometry ({geom.shape}), and Hessian ({hess.shape})""")
+            f"Dimension mismatch among mass ({mass.shape}), geometry ({geom.shape}), and Hessian ({hess.shape})")
 
     def mat_symm_info(a, atol=1e-14, lbl='array', stol=None):
         symm = np.allclose(a, a.T, atol=atol)
@@ -424,7 +408,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
     text = []
 
     nat = len(mass)
-    text.append("""\n\n  ==> Harmonic Vibrational Analysis <==\n""")
+    text.append("\n\n  ==> Harmonic Vibrational Analysis <==\n")
 
     if nat == 1:
         nrt_expected = 3
@@ -440,11 +424,11 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
     mints = core.MintsHelper(basisset)
     cdsalcs = mints.cdsalcs(0xFF, project_trans, project_rot)
 
-    Uh = collections.OrderedDict()
-    for h, lbl in enumerate(irrep_labels):
-        tmp = np.asarray(cdsalcs.matrix_irrep(h))
-        if tmp.size > 0:
-            Uh[lbl] = tmp
+    Uh = {
+        lbl: tmp
+        for h, lbl in enumerate(irrep_labels)
+        if np.asarray(cdsalcs.matrix_irrep(h)).size > 0
+    }
 
     # form projector of translations and rotations
     space = ('T' if project_trans else '') + ('R' if project_rot else '')
@@ -461,7 +445,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
 
     # mass-weight & solve
     sqrtmmm = np.repeat(np.sqrt(mass), 3)
-    sqrtmmminv = np.divide(1.0, sqrtmmm)
+    sqrtmmminv = 1/sqrtmmm
     mwhess = np.einsum('i,ij,j->ij', sqrtmmminv, nmwhess, sqrtmmminv)
     text.append(mat_symm_info(mwhess, lbl='mass-weighted Hessian') + ' (0)')
 
@@ -477,6 +461,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
     pre_lowfreq = np.append(pre_lowfreq, np.arange(nrt_expected))  # catch at least nrt modes
     for lf in set(pre_lowfreq):
         vlf = pre_frequency_cm_1[lf]
+        # TODO: fix print error!!!!!!
         if vlf.imag > vlf.real:
             text.append('  pre-proj  low-frequency mode: {:9.4f}i [cm^-1]'.format(vlf.real, vlf.imag))
         else:
@@ -514,12 +499,11 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
         if vec_in_space(qL[:, idx], TRspace, 1.0e-4):
             active.append('TR')
             irrep_classification.append(None)
-
         else:
             active.append('V')
 
-            for h in Uh.keys():
-                if vec_in_space(qL[:, idx], Uh[h], 1.0e-4):
+            for h, val in Uh.items():
+                if vec_in_space(qL[:, idx], val, 1.0e-4):
                     irrep_classification.append(h)
                     break
             else:
@@ -570,9 +554,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
                    qcel.constants.get('atomic unit of length'))**2
     if not (dipder is None or np.array(dipder).size == 0):
         qDD = dipder.dot(wL)
-        ir_intensity = np.zeros(qDD.shape[1])
-        for i in range(qDD.shape[1]):
-            ir_intensity[i] = qDD[:, i].dot(qDD[:, i])
+        ir_intensity = (qDD*qDD).sum(axis=0)
         # working but not needed
         #vibinfo['IR_intensity'] = Datum('infrared intensity', 'Eh a0/u', ir_intensity)
         #ir_intensity_D2A2u = ir_intensity * uconv_D2A2u
@@ -590,7 +572,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
 
     # turning points, LAB II.20 (real & zero since turning point silly for imag modes)
     nu = 0
-    turning_point_rnc = np.sqrt(2.0 * nu + 1.0)
+    turning_point_rnc = np.sqrt(2 * nu + 1)
 
     with np.errstate(divide='ignore'):
         turning_point_bohr_u = turning_point_rnc / (np.sqrt(frequency_cm_1.real) * uconv_S)
@@ -615,7 +597,7 @@ def harmonic_analysis(hess, geom, mass, basisset, irrep_labels, dipder=None, pro
 
 
 def _br(string):
-    return '[' + string + ']'
+    return f'[{string}]'
 
 
 def _format_omega(omega, decimals):
@@ -698,115 +680,114 @@ def print_vibs(vibinfo, atom_lbl=None, normco='x', shortlong=True, **kwargs):
     text = ''
     for row in grouper(active, groupby):
 
-        text += """\n{:{presp}}{:{prewidth}}""".format('', 'Vibration', prewidth=prewidth, presp=presp)
+        text += "\n{:{presp}}{:{prewidth}}".format('', 'Vibration', prewidth=prewidth, presp=presp)
         for vib in row:
             if vib is None:
                 # ran out of vibrations in this row
                 break
-            text += """{:^{width}d}{:{colsp}}""".format(vib + 1, '', width=width, colsp=colsp)
+            text += "{:^{width}d}{:{colsp}}".format(vib + 1, '', width=width, colsp=colsp)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('', 'Freq [cm^-1]', prewidth=prewidth, presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('', 'Freq [cm^-1]', prewidth=prewidth, presp=presp)
         for vib in row:
             if vib is None:
                 break
-            text += """{:^{width}}  """.format(omega_str[vib], width=width)
+            text += "{:^{width}}  ".format(omega_str[vib], width=width)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('', 'Irrep', prewidth=prewidth, presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('', 'Irrep', prewidth=prewidth, presp=presp)
         for vib in row:
             if vib is None:
                 break
             val = vibinfo['gamma'].data[vib]
-            if val is None:
-                val = ''
-            text += """{:^{width}}{:{colsp}}""".format(val, '', width=width, colsp=colsp)
+            val = '' if val is None else val
+            text += "{:^{width}}{:{colsp}}".format(val, '', width=width, colsp=colsp)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('',
-                                                     'Reduced mass ' + _br(vibinfo['mu'].units),
-                                                     prewidth=prewidth,
-                                                     presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('',
+                                                 f"Reduced mass [vibinfo['mu'].units]",
+                                                 prewidth=prewidth,
+                                                 presp=presp)
         for vib in row:
             if vib is None:
                 break
-            text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['mu'].data[vib],
-                                                               '',
-                                                               width=width,
-                                                               prec=prec,
-                                                               colsp=colsp)
+            text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['mu'].data[vib],
+                                                           '',
+                                                           width=width,
+                                                           prec=prec,
+                                                           colsp=colsp)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('',
-                                                     'Force const ' + _br(vibinfo['k'].units),
-                                                     prewidth=prewidth,
-                                                     presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('',
+                                                 f"Force const [vibinfo['k'].units]",
+                                                 prewidth=prewidth,
+                                                 presp=presp)
         for vib in row:
             if vib is None:
                 break
-            text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['k'].data[vib],
-                                                               '',
-                                                               width=width,
-                                                               prec=prec,
-                                                               colsp=colsp)
+            text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['k'].data[vib],
+                                                           '',
+                                                           width=width,
+                                                           prec=prec,
+                                                           colsp=colsp)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('',
-                                                     'Turning point v=0 ' + _br(vibinfo['Xtp0'].units),
-                                                     prewidth=prewidth,
-                                                     presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('',
+                                                 f"Turning point v=0 [vibinfo['Xtp0'].units]"),
+                                                 prewidth=prewidth,
+                                                 presp=presp)
         for vib in row:
             if vib is None:
                 break
-            text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['Xtp0'].data[vib],
-                                                               '',
-                                                               width=width,
-                                                               prec=prec,
-                                                               colsp=colsp)
+            text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['Xtp0'].data[vib],
+                                                           '',
+                                                           width=width,
+                                                           prec=prec,
+                                                           colsp=colsp)
         text += '\n'
 
-        text += """{:{presp}}{:{prewidth}}""".format('',
-                                                     'RMS dev v=0 ' + _br(vibinfo['DQ0'].units),
-                                                     prewidth=prewidth,
-                                                     presp=presp)
+        text += "{:{presp}}{:{prewidth}}".format('',
+                                                 f"RMS dev v=0 [vibinfo['DQ0'].units]",
+                                                 prewidth=prewidth,
+                                                 presp=presp)
         for vib in row:
             if vib is None:
                 break
-            text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['DQ0'].data[vib],
-                                                               '',
-                                                               width=width,
-                                                               prec=prec,
-                                                               colsp=colsp)
+            text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['DQ0'].data[vib],
+                                                           '',
+                                                           width=width,
+                                                           prec=prec,
+                                                           colsp=colsp)
         text += '\n'
 
         if 'IR_intensity' in vibinfo:
-            text += """{:{presp}}{:{prewidth}}""".format('',
-                                                         'IR activ ' + _br(vibinfo['IR_intensity'].units),
-                                                         prewidth=prewidth,
-                                                         presp=presp)
+            text += "{:{presp}}{:{prewidth}}".format('',
+                                                     f"IR activ [vibinfo['IR_intensity'].units]",
+                                                     prewidth=prewidth,
+                                                     presp=presp)
             for vib in row:
                 if vib is None:
                     break
-                text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['IR_intensity'].data[vib],
-                                                                   '',
-                                                                   width=width,
-                                                                   prec=prec,
-                                                                   colsp=colsp)
+                text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['IR_intensity'].data[vib],
+                                                               '',
+                                                               width=width,
+                                                               prec=prec,
+                                                               colsp=colsp)
             text += '\n'
 
         if 'theta_vib' in vibinfo:
-            text += """{:{presp}}{:{prewidth}}""".format('',
-                                                         'Char temp ' + _br(vibinfo['theta_vib'].units),
-                                                         prewidth=prewidth,
-                                                         presp=presp)
+            text += "{:{presp}}{:{prewidth}}".format('',
+                                                     'Char temp ' + _br(vibinfo['theta_vib'].units),
+                                                     prewidth=prewidth,
+                                                     presp=presp)
             for vib in row:
                 if vib is None:
                     break
-                text += """{:^{width}.{prec}f}{:{colsp}}""".format(vibinfo['theta_vib'].data[vib],
-                                                                   '',
-                                                                   width=width,
-                                                                   prec=prec,
-                                                                   colsp=colsp)
+                text += "{:^{width}.{prec}f}{:{colsp}}".format(vibinfo['theta_vib'].data[vib],
+                                                               '',
+                                                               width=width,
+                                                               prec=prec,
+                                                               colsp=colsp)
             text += '\n'
 
         #text += 'Raman activ [A^4/u]\n'
@@ -814,35 +795,35 @@ def print_vibs(vibinfo, atom_lbl=None, normco='x', shortlong=True, **kwargs):
 
         if shortlong:
             for at in range(nat):
-                text += """{:{presp}}{:5d}   {:{width}}""".format('',
-                                                                  at + 1,
-                                                                  atom_lbl[at],
-                                                                  width=prewidth - 8,
-                                                                  presp=presp)
+                text += "{:{presp}}{:5d}   {:{width}}".format('',
+                                                              at + 1,
+                                                              atom_lbl[at],
+                                                              width=prewidth - 8,
+                                                              presp=presp)
                 for vib in row:
                     if vib is None:
                         break
-                    text += ("""{:^{width}.{prec}f}""" * 3).format(*(vibinfo[normco].data[:, vib].reshape(nat, 3)[at]),
-                                                                   width=int(width / 3),
-                                                                   prec=ncprec)
-                    text += """{:{colsp}}""".format('', colsp=colsp)
+                    text += ("{:^{width}.{prec}f}" * 3).format(*(vibinfo[normco].data[:, vib].reshape(nat, 3)[at]),
+                                                               width=width // 3,
+                                                               prec=ncprec)
+                    text += "{:{colsp}}".format('', colsp=colsp)
                 text += '\n'
         else:
             for at in range(nat):
                 for xyz in range(3):
-                    text += """{:{presp}}{:5d}    {}    {:{width}}""".format('',
-                                                                             at + 1,
-                                                                             'XYZ' [xyz],
-                                                                             atom_lbl[at],
-                                                                             width=prewidth - 14,
-                                                                             presp=presp)
+                    text += "{:{presp}}{:5d}    {}    {:{width}}".format('',
+                                                                         at + 1,
+                                                                         'XYZ' [xyz],
+                                                                         atom_lbl[at],
+                                                                         width=prewidth - 14,
+                                                                         presp=presp)
                     for vib in row:
                         if vib is None:
                             break
-                        text += """{:^{width}.{prec}f}""".format((vibinfo[normco].data[3 * at + xyz, vib]),
-                                                                 width=width,
-                                                                 prec=ncprec)
-                        text += """{:{colsp}}""".format('', colsp=colsp)
+                        text += "{:^{width}.{prec}f}".format((vibinfo[normco].data[3 * at + xyz, vib]),
+                                                             width=width,
+                                                             prec=ncprec)
+                        text += "{:{colsp}}".format('', colsp=colsp)
                     text += '\n'
 
     return text
@@ -949,12 +930,13 @@ def thermo(vibinfo, T, P, multiplicity, molecular_mass, E0, sigma, rot_const, ro
 
     #real_vibs = np.ma.masked_where(vibinfo['omega'].data.imag > vibinfo['omega'].data.real, vibinfo['omega'].data)
 
+    gibbs_terms = ['elec', 'trans', 'rot', 'vib']
     # compute Gibbs
-    for term in ['elec', 'trans', 'rot', 'vib']:
+    for term in gibbs_terms:
         sm[('G', term)] = sm[('H', term)] - T * sm[('S', term)]
 
     # convert to atomic units
-    for term in ['elec', 'trans', 'rot', 'vib']:
+    for term in gibbs_terms:
         # terms above are unitless (S, Cv, Cp) or in units of temperature (ZPE, E, H, G) as expressions are divided by R.
         # R [Eh/K], computed as below, slightly diff in 7th sigfig from 3.1668114e-6 (k_B in [Eh/K])
         #    value listed https://en.wikipedia.org/wiki/Boltzmann_constant
@@ -966,20 +948,21 @@ def thermo(vibinfo, T, P, multiplicity, molecular_mass, E0, sigma, rot_const, ro
 
     # sum corrections and totals
     for piece in ['S', 'Cv', 'Cp']:
-        for term in ['elec', 'trans', 'rot', 'vib']:
+        for term in gibbs_terms
             sm[(piece, 'tot')] += sm[(piece, term)]
     for piece in ['ZPE', 'E', 'H', 'G']:
-        for term in ['elec', 'trans', 'rot', 'vib']:
+        for term in gibbs_terms:
             sm[(piece, 'corr')] += sm[(piece, term)]
         sm[(piece, 'tot')] = E0 + sm[(piece, 'corr')]
 
-    terms = collections.OrderedDict()
-    terms['elec'] = '  Electronic'
-    terms['trans'] = '  Translational'
-    terms['rot'] = '  Rotational'
-    terms['vib'] = '  Vibrational'
-    terms['tot'] = 'Total'
-    terms['corr'] = 'Correction'
+    terms {
+        'elec': '  Electronic',
+        'trans': '  Translational',
+        'rot': '  Rotational',
+        'vib': '  Vibrational',
+        'tot': 'Total',
+        'corr': 'Correction',
+    }
 
     # package results for export
     for entry in sm:
@@ -990,65 +973,71 @@ def thermo(vibinfo, T, P, multiplicity, molecular_mass, E0, sigma, rot_const, ro
         therminfo['_'.join(entry)] = Datum(terms[entry[1]].strip().lower() + ' ' + entry[0], unit, sm[entry])
 
     # display
-    format_S_Cv_Cp = """\n  {:19} {:11.3f} [cal/(mol K)]  {:11.3f} [J/(mol K)]  {:15.8f} [mEh/K]"""
-    format_ZPE_E_H_G = """\n  {:19} {:11.3f} [kcal/mol]  {:11.3f} [kJ/mol]  {:15.8f} [Eh]"""
-    uconv = np.asarray([qcel.constants.hartree2kcalmol, qcel.constants.hartree2kJmol, 1.])
+    format_S_Cv_Cp = "\n  {:19} {:11.3f} [cal/(mol K)]  {:11.3f} [J/(mol K)]  {:15.8f} [mEh/K]"
+    format_ZPE_E_H_G = "\n  {:19} {:11.3f} [kcal/mol]  {:11.3f} [kJ/mol]  {:15.8f} [Eh]"
+    uconv = np.asarray([qcel.constants.hartree2kcalmol, qcel.constants.hartree2kJmol, 1])
 
     # TODO rot_const, rotor_type
-    text = ''
-    text += """\n  ==> Thermochemistry Components <=="""
+    text = "\n==> Thermochemistry Components <==\n\n  Entropy, S"
 
-    text += """\n\n  Entropy, S"""
-    for term in terms:
-        text += format_S_Cv_Cp.format(terms[term] + ' S', *sm[('S', term)] * uconv)
+    for term, string in terms.items():
+        text += format_S_Cv_Cp.format(f'{string} S', *sm[('S', term)] * uconv)
         if term == 'elec':
-            text += """ (multiplicity = {})""".format(multiplicity)
+            text += " (multiplicity = {multiplicity})"
         elif term == 'trans':
-            text += """ (mol. weight = {:.4f} [u], P = {:.2f} [Pa])""".format(molecular_mass, P)
+            text += " (mol. weight = {molecular_mass:.4f} [u], P = {P:.2f} [Pa])"
         elif term == 'rot':
-            text += """ (symmetry no. = {})""".format(sigma)
+            text += " (symmetry no. = {sigma})"""
 
-    text += """\n\n  Constant volume heat capacity, Cv"""
-    for term in terms:
-        text += format_S_Cv_Cp.format(terms[term] + ' Cv', *sm[('Cv', term)] * uconv)
+    text += "\n\n  Constant volume heat capacity, Cv"
+    text += ''.join(
+        format_S_Cv_Cp.format(f"{string} Cv", *sm[('Cv', term)] * uconv)
+        for term, string in terms.items()
+    )
 
-    text += """\n\n  Constant pressure heat capacity, Cp"""
-    for term in terms:
-        text += format_S_Cv_Cp.format(terms[term] + ' Cp', *sm[('Cp', term)] * uconv)
+    text += "\n\n  Constant pressure heat capacity, Cp"
+    text += ''.join(
+        format_S_Cv_Cp.format(f"{string} Cp", *sm[('Cp', term)] * uconv)
+        for term, string in terms.items()
+    )
 
     del terms['tot']
     terms['corr'] = 'Correction'
 
-    text += """\n\n  ==> Thermochemistry Energy Analysis <=="""
+    text += "\n\n  ==> Thermochemistry Energy Analysis <=="
 
-    text += """\n\n  Raw electronic energy, E0"""
-    text += """\n  Total E0, Electronic energy at well bottom at 0 [K]               {:15.8f} [Eh]""".format(E0)
+    text += "\n\n  Raw electronic energy, E0"
+    text += f"\n  Total E0, Electronic energy at well bottom at 0 [K]               {E0:15.8f} [Eh]"
 
-    text += """\n\n  Zero-point energy, ZPE_vib = Sum_i nu_i / 2"""
-    for term in terms:
-        text += format_ZPE_E_H_G.format(terms[term] + ' ZPE', *sm[('ZPE', term)] * uconv)
+    text += "\n\n  Zero-point energy, ZPE_vib = Sum_i nu_i / 2"
+    for term, string in terms.items():
+        text += format_ZPE_E_H_G.format(f"{string} ZPE", *sm[('ZPE', term)] * uconv)
         if term in ['vib', 'corr']:
-            text += """ {:15.3f} [cm^-1]""".format(sm[('ZPE', term)] * qcel.constants.hartree2wavenumbers)
-    text += """\n  Total ZPE, Electronic energy at 0 [K]                             {:15.8f} [Eh]""".format(
-        sm[('ZPE', 'tot')])
+            text += f" {sm[('ZPE', term)] * qcel.constants.hartree2wavenumbers):15.3f} [cm^-1]"
 
-    text += """\n\n  Thermal Energy, E (includes ZPE)"""
-    for term in terms:
-        text += format_ZPE_E_H_G.format(terms[term] + ' E', *sm[('E', term)] * uconv)
-    text += """\n  Total E, Electronic energy at {:7.2f} [K]                         {:15.8f} [Eh]""".format(
-        T, sm[('E', 'tot')])
+    text += f"\n  Total ZPE, Electronic energy at 0 [K]                             {sm[('ZPE', 'tot')]:15.8f} [Eh]"
 
-    text += """\n\n  Enthalpy, H_trans = E_trans + k_B * T"""
-    for term in terms:
-        text += format_ZPE_E_H_G.format(terms[term] + ' H', *sm[('H', term)] * uconv)
-    text += """\n  Total H, Enthalpy at {:7.2f} [K]                                  {:15.8f} [Eh]""".format(
-        T, sm[('H', 'tot')])
+    text += "\n\n  Thermal Energy, E (includes ZPE)"
+    text += "".join(
+        format_ZPE_E_H_G.format(f'{string} E', *sm[('E', term)] * uconv)
+        for term, string in terms.items()
+    )
 
-    text += """\n\n  Gibbs free energy, G = H - T * S"""
-    for term in terms:
-        text += format_ZPE_E_H_G.format(terms[term] + ' G', *sm[('G', term)] * uconv)
-    text += """\n  Total G, Free enthalpy at {:7.2f} [K]                             {:15.8f} [Eh]\n""".format(
-        T, sm[('G', 'tot')])
+    text += "".join("\n  Total E, Electronic energy at {T:7.2f} [K]                         {sm[('E', 'tot')]:15.8f} [Eh]"
+
+    text += "\n\n  Enthalpy, H_trans = E_trans + k_B * T"
+    text += "".join(format_ZPE_E_H_G.format(f"{string} H", *sm[('H', term)] * uconv)
+        for term, string in terms.items()
+    )
+    text += "".join("\n  Total H, Enthalpy at {T:7.2f} [K]                                  {sm[('H', 'tot')]:15.8f} [Eh]"""
+
+
+    text += "\n\n  Gibbs free energy, G = H - T * S"
+    text += "".join(format_ZPE_E_H_G.format(f"{string} G", *sm[('G', term)] * uconv)
+        for term, string in terms.items()
+    )
+
+    text += f"\n  Total G, Free enthalpy at {T:7.2f} [K]                             {sm[('G', 'tot')]:15.8f} [Eh]\n"
 
     return therminfo, text
 
@@ -1061,9 +1050,9 @@ def filter_nonvib(vibinfo, remove=None):
     vibinfo : dict of vibration Datum
         Results of Hessian analysis.
     remove : list of int, optional
-	    0-indexed indices of normal modes to remove from `vibinfo`. If
-	    None, non-vibrations (R, T, or TR as labeled in `vibinfo['TRV']`)
-	    will be removed.
+        0-indexed indices of normal modes to remove from `vibinfo`. If
+        None, non-vibrations (R, T, or TR as labeled in `vibinfo['TRV']`)
+        will be removed.
 
     Returns
     -------
@@ -1079,14 +1068,12 @@ def filter_nonvib(vibinfo, remove=None):
     >>> a1vibs = filter_nonvib(allvibs, remove=[i for i, d in enumerate(allvibs['gamma'].data) if d != 'A1'])
 
     """
-    work = {}
     if remove is None:
         remove = [idx for idx, dat in enumerate(vibinfo['TRV'].data) if dat != 'V']
+
+    work = {}
     for asp, oasp in vibinfo.items():
-        if asp in ['q', 'w', 'x']:
-            axis = 1
-        else:
-            axis = 0
+        axis = 1 if asp in ['q', 'w', 'x'] else 0
         work[asp] = Datum(oasp.label, oasp.units, np.delete(oasp.data, remove, axis=axis), comment=oasp.comment, numeric=False)
 
     return work
@@ -1094,13 +1081,10 @@ def filter_nonvib(vibinfo, remove=None):
 
 def filter_omega_to_real(omega):
     """Returns ndarray (float) of `omega` (complex) where imaginary entries are converted to negative reals."""
-    freqs = []
-    for fr in omega:
-        if fr.imag > fr.real:
-            freqs.append(-1 * fr.imag)
-        else:
-            freqs.append(fr.real)
-    return np.asarray(freqs)
+    return np.fromiter(
+        (-fr.imag for fr in omega if fr.imag > fr.real else fr.real),
+        dtype=float,
+    )
 
 
 def _get_TR_space(m, geom, space='TR', tol=None, verbose=1):
@@ -1182,8 +1166,7 @@ def _get_TR_space(m, geom, space='TR', tol=None, verbose=1):
             print(s)
         M, N = A.shape
         eps = np.finfo(float).eps
-        if tol is None:
-            tol = max(M, N) * np.amax(s) * eps
+        tol = max(M, N) * np.amax(s) * eps if tol is None else tol
         num = np.sum(s > tol, dtype=int)
         Q = u[:, :num]
         return Q
